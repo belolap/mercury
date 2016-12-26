@@ -1,0 +1,6 @@
+/log/
+*.pyc
+*.swp
+*.db
+credentials.txt
+configure.ac
