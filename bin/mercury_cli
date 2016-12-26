@@ -1,0 +1,425 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+__author__ = 'Gennady Kovalev <gik@bigur.ru>'
+__copyright__ = '(c) 2015-2016 Business group for development management'
+__licence__ = 'GPL'
+
+import sys
+import sqlite3
+import logging
+import argparse
+import datetime
+import calendar
+
+import mercury
+import mercury.command as command
+
+
+# SQL query templates
+SQL_CREATE_TABLE = '''\
+CREATE TABLE IF NOT EXISTS data (
+  hub INTEGER NOT NULL,
+  counter INTEGER NOT NULL,
+  level INTEGER NOT NULL,
+  type INTEGER NOT NULL,
+  date DATETIME NOT NULL,
+  value INTEGER NOT NULL,
+  exported BOOL NOT NULL DEFAULT 0);'''
+
+SQL_SEARCH_HISTORY_RECORD = '''\
+SELECT
+  hub, counter, date, value
+FROM data
+WHERE
+  hub=? AND
+  counter=? AND
+  date=?'''
+
+SQL_SEARCH_LAST_RECORD = '''\
+SELECT
+  hub, counter, date, value
+FROM data
+WHERE
+  hub=? AND
+  counter=?
+ORDER BY date DESC
+LIMIT 1'''
+
+SQL_SELECT_COUNTERS = '''\
+SELECT
+  DISTINCT(counter)
+FROM
+  data
+WHERE
+  date > ?'''
+
+SQL_GET_LAST_VALUE = '''\
+SELECT
+  date, value
+FROM
+  data
+WHERE
+  counter = ? AND
+  date > ? AND
+  date < ?
+ORDER BY date DESC
+LIMIT 1;
+'''
+
+SQL_UPDATE_LAST_RECORD = '''\
+UPDATE data
+SET date=?
+WHERE
+  hub=? AND
+  counter=? AND
+  date=?'''
+
+SQL_INSERT_RECORD = '''\
+INSERT INTO
+  data (hub, counter, level, type, date, value, exported)
+VALUES
+  (?, ?, ?, ?, ?, ?, 0)'''
+
+
+# Parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('-v', dest='verbose', action='store_true',
+                    help='output debug information')
+parser.add_argument('--device', default='/dev/ttyUSB0', metavar='PATH',
+                    help='device to connect, default /dev/ttyUSB0')
+parser.add_argument('--address', metavar='ADDR', nargs='*',
+                    help='device address in hex, e.g. 0x2fff')
+parser.add_argument('--dbase', default='mercury.db', metavar='PATH',
+                    help='database to use, default mercury.db')
+
+commands_group = parser.add_argument_group('commands')
+commands_group.add_argument('--print-address', action='store_true',
+                    help='query and print device\'s address')
+commands_group.add_argument('--print-config', action='store_true',
+                    help='query and print device\'s configuration')
+commands_group.add_argument('--set-config', action='store_true',
+                    help='set device\'s configuration')
+commands_group.add_argument('--print-readings', metavar='COUNTER', type=int,
+                    help='print all readings for specific counter')
+commands_group.add_argument('--print-last-readings', action='store_true',
+                    help='print last readings for all counters')
+commands_group.add_argument('--download-readings', action='store_true',
+                    help='download readings to database')
+commands_group.add_argument('--create-html', metavar='FILE',
+                    help='create html file with statistics')
+
+set_config = parser.add_argument_group('--set-config command options')
+set_config.add_argument('--config-counters', type=int, metavar='NUMBER',
+                    help='capaсity of network')
+set_config.add_argument('--config-mode', metavar='MODE',
+                    help='device mode: Normal | MasterSR | SlaveSRT | SlaveSR')
+
+args = parser.parse_args()
+
+
+# Logging
+if args.verbose:
+    logging.basicConfig(level=logging.DEBUG, format='%(message)s')
+else:
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+logger = logging.getLogger('root')
+
+
+# Normalize arguments
+if args.address is None:
+    addresses = [0x2fff]
+else:
+    try:
+        addresses = [int(x.strip(), 16) for x in args.address]
+    except ValueError:
+        parser.error('invalid device address')
+for address in addresses:
+    if address < 0 or address > 65535:
+        parser.error('invalid device address')
+
+if args.config_counters is not None:
+    if args.config_counters < 1 or args.config_counters > 1024:
+        parser.error('invalid config counters')
+if args.config_mode is not None:
+    modes = ['Normal', 'MasterSR', 'SlaveSRT', 'SlaveSR']
+    if args.config_mode not in modes:
+        parser.error('invalid config mode')
+if args.print_readings is not None:
+    if args.print_readings < 0 or args.print_readings > 1023:
+        parser.error('invalid counter address')
+
+
+def print_config(config, title='Hub configuration:'):
+    print(title)
+    print(' Counters:             %(counters)s' % config)
+    print(' Transparent mode:     %(transparent_mode)s' % config['config'])
+    print(' Zero threshold:       %(zero_threshold)s' % config['config'])
+    print(' Mode:                 %(mode)s' % config['config'])
+    print(' Daylight saving time: %(dst)s' % config['config'])
+    print(' PLC is disabled:      %(plc_disabled)s' % config['config'])
+
+
+# Execute commands for hubs
+for address in addresses:
+    try:
+        hub = mercury.Hub(args.device, address)
+
+        # ----------------------------------------------------------------------
+        if args.print_address:
+            print('Hub address: %s' % hex(hub.execute(command.GetNetworkID())))
+
+        # ----------------------------------------------------------------------
+        if args.print_config:
+            config = hub.execute(command.GetConfig())
+            print_config(config)
+
+        # ----------------------------------------------------------------------
+        if args.set_config:
+            config = hub.execute(command.GetConfig())
+            print_config(config, 'Old configuration')
+            print
+            if args.config_counters is not None:
+                config['counters'] = args.config_counters
+            if args.config_mode is not None:
+                config['config']['mode'] = args.config_mode
+            config  = hub.execute(command.SetConfig(config))
+            print_config(config, 'New configuration')
+
+        # ----------------------------------------------------------------------
+        if args.print_readings is not None:
+            counter = args.print_readings
+            reading = hub.execute(command.GetLastPacket(counter))
+            if reading:
+                if reading['date'] is None:
+                    dt = '-'
+                else:
+                    dt = reading['date'].strftime('%d.%m.%y %H:%M')
+                print 'Reading for counter %s' % counter
+                print ' Date:  %s' % dt
+                print ' Type:  0x%02x' % reading['type']
+                print ' Level: %s' % reading['level']
+                print ' Value: %s' % reading['value']
+                print
+
+                history = hub.execute(command.GetHistory(counter))
+                history = [x for x in history if x['type'] > 0]
+                history = sorted(history, key=lambda x: x['date'])
+                print 'History:'
+                print 'Date            Type Level Reading'
+                print '==============  ==== ===== ======='
+                for record in history:
+                    row = {}
+                    if record['date'] is None:
+                        row['date'] = '-'
+                    else:
+                        row['date'] = record['date'].strftime('%d.%m.%y %H:%M')
+                    row['type'] = record['type']
+                    row['level'] = record['level']
+                    if record['value'] is None:
+                        row['value'] = '-'
+                    else:
+                        row['value'] = str(record['value'])
+                    print ('{date: >14}  0x{type:02x} {level: >5d} '
+                           '{value: >7s}'.format(**row))
+            else:
+                print 'There is no readings for counter %s' % counter
+
+        # ----------------------------------------------------------------------
+        if args.print_last_readings:
+            config = hub.execute(command.GetConfig())
+            print 'Counter  Date            Type Level Reading'
+            print '=======  ==============  ==== ===== ======='
+            for counter in range(0, config['counters']):
+                reading = hub.execute(command.GetLastPacket(counter))
+                if reading is None:
+                    continue
+                row = {'counter': counter}
+                if reading['date'] is None:
+                    row['date'] = '-'
+                else:
+                    row['date'] = reading['date'].strftime('%d.%m.%y %H:%M')
+                row['type'] = reading['type']
+                row['level'] = reading['level']
+                if reading['value'] is None:
+                    row['value'] = '-'
+                else:
+                    row['value'] = str(reading['value'])
+                print ('{counter: >7d}  {date: >14}  0x{type:02x} {level: >5d} '
+                       '{value: >7s}'.format(**row))
+
+        # ----------------------------------------------------------------------
+        if args.download_readings:
+            db = sqlite3.connect(args.dbase)
+            c = db.cursor()
+            c.execute(SQL_CREATE_TABLE)
+
+            def add_record(address, counter, record):
+                if record['type'] > 0:
+                    c.execute(SQL_INSERT_RECORD, (address,
+                                                  counter,
+                                                  record['level'],
+                                                  record['type'],
+                                                  record['date'],
+                                                  record['value']))
+                    db.commit()
+
+            address = hub.execute(command.GetNetworkID())
+            config = hub.execute(command.GetConfig())
+            for counter in range(0, config['counters']):
+                history = hub.execute(command.GetHistory(counter))
+                if history:
+                    last_record = history[-1]
+                    for record in history[:-1]:
+                        c.execute(SQL_SEARCH_HISTORY_RECORD,
+                                            (address, counter, record['date']))
+                        existing = c.fetchone()
+                        if existing is None:
+                            add_record(address, counter, record)
+
+                    c.execute(SQL_SEARCH_LAST_RECORD, (address, counter))
+                    existing = c.fetchone()
+                    if existing is None or existing[3] != last_record['value']:
+                        add_record(address, counter, last_record)
+                    else:
+                        existing_date = datetime.datetime.strptime(
+                                            existing[2], '%Y-%m-%d %H:%M:%S')
+                        existing_month = existing_date.replace(day=1).date()
+                        last_month = last_record['date'].replace(day=1).date()
+                        if existing_month == last_month:
+                            if existing_date != last_record['date']:
+                                c.execute(SQL_UPDATE_LAST_RECORD, (
+                                        last_record['date'], address, counter,
+                                        existing_date))
+                            db.commit()
+                        else:
+                            add_record(address, counter, last_record)
+
+            db.close()
+
+        # ----------------------------------------------------------------------
+        if args.create_html:
+            db = sqlite3.connect(args.dbase)
+            c = db.cursor()
+            c.execute(SQL_CREATE_TABLE)
+
+            months = []
+
+            month = datetime.date.today().replace(day=1)
+            for i in range(0, 6):
+                months.append(month)
+                month = (month - datetime.timedelta(days=1)).replace(day=1)
+
+            c.execute(SQL_SELECT_COUNTERS, (months[-1],))
+            values = dict([(x[0], {}) for x in c.fetchall()])
+            for start in months:
+                end = start + datetime.timedelta(
+                        days=calendar.monthrange(start.year, start.month)[1])
+                for counter in values.keys():
+                    c.execute(SQL_GET_LAST_VALUE, (counter, start, end))
+                    row = c.fetchone()
+                    if row:
+                        values[counter][start] = row
+                    else:
+                        values[counter][start] = (None, None)
+
+            db.close()
+
+            names = ['янв', 'фев', 'мар',
+                     'апр', 'май', 'июн',
+                     'июл', 'авг', 'сен',
+                     'окт', 'ноя', 'дек']
+
+            table = []
+            table.append([''] + ['<span class="month">%s \'%s</span>' % \
+                            (names[x.month - 1], x.strftime('%y')) \
+                                                        for x in months])
+            for counter in sorted(values):
+                row = [counter]
+                for month in months:
+                    row.append(values[counter])
+
+            with open(args.create_html, 'w') as fh:
+                fh.write('<html>\n')
+                fh.write('<head>\n')
+                fh.write('<title>Показания счётчиков</title>\n')
+                fh.write('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n')
+                fh.write('<meta http-equiv="cache-control" content="max-age=0" />\n')
+                fh.write('<meta http-equiv="cache-control" content="no-cache" />\n')
+                fh.write('<meta http-equiv="expires" content="0" />\n')
+                fh.write('<meta http-equiv="expires" content="Tue, 01 Jan 1980 1:00:00 GMT" />\n')
+                fh.write('<meta http-equiv="pragma" content="no-cache" />\n')
+                fh.write('</head>\n')
+                fh.write('<style>\n')
+                fh.write('html, body { font-family: Helvetica, Arial, Sans-serif; background-color: #fff }\n')
+                fh.write('table { width: 100%; border-collapse: collapse; }\n')
+                fh.write('h1 { font-size: 1.5 em; font-weight: bold; }\n')
+                fh.write('tr:nth-child(even) { background-color: #e2f2c3; }\n')
+                fh.write('tr:nth-child(odd) { background-color: #edf2e3; }\n')
+                fh.write('tr:first-child { background-color: #6a9418; color: #fff; }\n')
+                fh.write('tr:hover { background-color: #b4de62; color: #000; }\n')
+                fh.write('th.month { font-size: 1.5em; }\n')
+                fh.write('td { padding: .5em; margin: 0; text-align: center; border: 1px solid #fff; }\n')
+                fh.write('.counter { display: block; font-size: 1.5em; }\n')
+                fh.write('.value-block { display: block; }\n')
+                fh.write('.readings-block { display: block; }\n')
+                fh.write('.delta { font-size: 1.5em; color: red;}\n')
+                fh.write('.value { font-size: 1em; color: #333; }\n')
+                fh.write('.date { font-size: .9em; color: #999; }\n')
+                fh.write('.doc { margin: 1em; font-size: 1em; color: #333; }\n')
+                fh.write('</style>\n')
+                fh.write('<body>\n')
+                fh.write('<h1>Показания счётчиков (%s)</h1>\n' % datetime.datetime.now().strftime('%d.%m.%y %H:%M'))
+                fh.write('<table>\n')
+                fh.write('<tr>\n')
+                fh.write('<th></th>\n')
+                current_month = datetime.date.today().replace(day=1)
+                for month in months:
+                    fh.write('<th class="month">%s \'%s</th>\n' % \
+                            (names[month.month - 1], month.strftime('%y')))
+                for counter in sorted(values):
+                    fh.write('<tr>\n')
+                    fh.write('<td><div class=counter>%s</div></td>\n' % counter)
+                    date_frmt = '%d.%m %H:%M'
+                    for month in months:
+                        fh.write('<td>')
+                        date, value = values[counter][month]
+                        if value is not None:
+                            date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
+                            prev_month = (month - datetime.timedelta(days=1)).replace(day=1)
+                            prev_val = values[counter].get(prev_month, (None, None))[1]
+                            delta = None
+                            if prev_val is not None:
+                                delta = value - prev_val
+                            if delta or prev_val is None or month == current_month:
+                                fh.write('<div class="value-block">')
+                                if delta:
+                                    fh.write('<div class="delta">%s</div>' % delta)
+                                else:
+                                    fh.write('<div class="delta">&nbsp;</div>')
+                                if value > 0 or month == current_month:
+                                    fh.write('<div class="readings-block">')
+                                    fh.write('<span class="value">%s</span>' % value)
+                                    fh.write('&nbsp;<span class="date">(%s)</span>' % date.strftime(date_frmt))
+                                    fh.write('</div>')
+                                fh.write('</div>')
+                        fh.write('</td>\n')
+                        date_frmt = '%d.%m'
+                    fh.write('</tr>\n')
+                fh.write('</tr>\n')
+                fh.write('</table>\n')
+
+                fh.write('<div class="doc">')
+                fh.write('<p><span style="font-weight: bold; color: red;">Красным</span> цветом указано количество кВт*ч, потреблённых в соответствующем месяце.</p>')
+                fh.write('<p><span style="font-weight: bold;">Чёрным</span> указаны показания счётчика, дата снятия показаний указана в скобках.')
+                fh.write('</div>')
+
+
+                fh.write('</body>\n')
+                fh.write('</html>\n')
+
+    except mercury.OperationalError as e:
+        logger.error(str(e))
+        exit(-1)
+
+sys.exit(0)
