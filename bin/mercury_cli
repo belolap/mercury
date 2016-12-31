@@ -8,8 +8,13 @@ import sys
 import sqlite3
 import logging
 import argparse
+import time
 import datetime
 import calendar
+import cookielib
+import urllib2
+import ssl
+import json
 
 import mercury
 import mercury.command as command
@@ -80,6 +85,20 @@ INSERT INTO
 VALUES
   (?, ?, ?, ?, ?, ?, 0)'''
 
+SQL_UPLOAD_SELECT = '''\
+SELECT
+    hub, counter, level, type, date, value
+FROM data
+WHERE exported=0
+ORDER BY date
+LIMIT 100'''
+
+SQL_UPLOAD_MARK_EXPORTED='''\
+UPDATE data
+SET exported=1
+WHERE hub=? AND counter=? AND date=? AND value=?
+'''
+
 
 # Parse arguments
 parser = argparse.ArgumentParser()
@@ -107,12 +126,22 @@ commands_group.add_argument('--download-readings', action='store_true',
                     help='download readings to database')
 commands_group.add_argument('--create-html', metavar='FILE',
                     help='create html file with statistics')
+commands_group.add_argument('--upload', action='store_true',
+                    help='upload readings to office')
 
-set_config = parser.add_argument_group('--set-config command options')
+set_config = parser.add_argument_group('set-config command options')
 set_config.add_argument('--config-counters', type=int, metavar='NUMBER',
                     help='capaсity of network')
 set_config.add_argument('--config-mode', metavar='MODE',
                     help='device mode: Normal | MasterSR | SlaveSRT | SlaveSR')
+
+set_config = parser.add_argument_group('upload command options')
+set_config.add_argument('--upload-url', metavar='URL',
+                    help='url to office portal',
+                    default='https://bigur.com/')
+set_config.add_argument('--upload-credentials', metavar='FILE',
+                    help='file with login and password (one per line)',
+                    default='credentials.txt')
 
 args = parser.parse_args()
 
@@ -158,6 +187,19 @@ def print_config(config, title='Hub configuration:'):
     print(' Mode:                 %(mode)s' % config['config'])
     print(' Daylight saving time: %(dst)s' % config['config'])
     print(' PLC is disabled:      %(plc_disabled)s' % config['config'])
+
+
+# Local time zone
+class LocalTZ(datetime.tzinfo):
+
+    def utcoffset(self, dt):
+        return datetime.timedelta(seconds=-time.timezone)
+
+    # XXX: what about locale's DST detection?
+    def dst(self, dt):
+        return datetime.timedelta(0)
+
+local_timezone = LocalTZ()
 
 
 # Execute commands for hubs
@@ -418,8 +460,121 @@ for address in addresses:
                 fh.write('</body>\n')
                 fh.write('</html>\n')
 
+        # ----------------------------------------------------------------------
+        if args.upload:
+            db = sqlite3.connect(args.dbase)
+            c = db.cursor()
+            c.execute(SQL_UPLOAD_SELECT)
+            data = c.fetchall()
+
+            if not data:
+                logger.debug('No data, exiting')
+                sys.exit(0)
+
+            # Create XML message
+            message = '<?xml version="1.0" encoding="utf-8"?>\n'
+            message += '<ElectrometersReadings>\n'
+            template = ' <Reading date="{date}" hub="{hub}" counter="{counter}" type="{type}" level="{level}">{value}</Reading>\n'
+            for hub, counter, level, type_, date, value in data:
+                date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
+                date = date.replace(tzinfo=local_timezone)
+                date = date.strftime('%Y-%m-%dT%H:%M:%S%z')
+                message += template.format(date=date,
+                                           hub=hub,
+                                           counter=counter,
+                                           type=type_,
+                                           level=level,
+                                           value=value)
+            message += '</ElectrometersReadings>\n'
+
+            # Load login and password
+            try:
+                with open(args.upload_credentials, 'r') as fh:
+                    login = fh.readline()
+                    password = fh.readline()
+                    if not login or not password:
+                        logger.error('Can\'t find login or password in '
+                                     'credentials file')
+                        sys.exit(-1)
+                    login = login.strip()
+                    password = password.strip()
+            except IOError as e:
+                logger.error(e)
+                sys.exit(-1)
+
+            # Setup connection to server
+            cookie = cookielib.CookieJar()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+            opener = urllib2.build_opener(urllib2.HTTPHandler(),
+                                          urllib2.HTTPSHandler(context=context),
+                                          urllib2.HTTPCookieProcessor(cookie))
+
+            class Request(urllib2.Request):
+
+                def __init__(self, url, method, data, content_type):
+                    self._method = method
+                    urllib2.Request.__init__(self, url, data)
+                    self.add_header('Content-Type', content_type)
+
+                def get_method(self):
+                    return self._method
+
+            base_url = args.upload_url.strip()
+            if base_url.endswith('/'):
+                base_url = base_url.rstrip('/')
+
+            try:
+                # Create session
+                logger.debug('Connecting to {}'.format(args.upload_url))
+                logger.debug('Creating session for user {}'.format(login))
+                request = Request(base_url + '/sessions',
+                                  'POST',
+                                  json.dumps({'login': login,
+                                              'password': password}),
+                                  'application/json')
+                fh = opener.open(request)
+                if fh.getcode() != 200:
+                    logger.error('Can\'t create session, '
+                                 'error %s' % fh.getcode())
+                    sys.exit(-1)
+                sid = json.loads(fh.read())['sid']
+
+                # Send data
+                logger.debug('Sending {} rows of data...'.format(len(data)))
+                request = Request(base_url + '/documents',
+                                  'POST',
+                                  message,
+                                  'application/xml')
+                fh = opener.open(request)
+                if fh.getcode() != 200:
+                    logger.error('Can\'t send data, '
+                                 'error %s' % fh.getcode())
+                else:
+                    # Mark readings as exported
+                    logger.debug('Mark readings as exported')
+                    for reading in data:
+                        c.execute(SQL_UPLOAD_MARK_EXPORTED,
+                            (reading[0], reading[1], reading[4], reading[5]))
+                    db.commit()
+
+                # Close session
+                logger.debug('Closing session')
+                request = Request(base_url + '/sessions/' + sid,
+                                  'DELETE',
+                                  None,
+                                  'application/json')
+                fh = opener.open(request)
+                if fh.getcode() != 200:
+                    logger.error('Can\'t close session, '
+                                 'error %s' % fh.getcode())
+                    sys.exit(-1)
+
+            except Exception as e:
+                logger.error(e)
+                sys.exit(-1)
+
     except mercury.OperationalError as e:
         logger.error(str(e))
-        exit(-1)
+        sys.exit(-1)
 
 sys.exit(0)
