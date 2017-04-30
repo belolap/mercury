@@ -203,8 +203,8 @@ local_timezone = LocalTZ()
 
 
 # Execute commands for hubs
-for address in addresses:
-    try:
+try:
+    for address in addresses:
         hub = mercury.Hub(args.device, address)
 
         # ----------------------------------------------------------------------
@@ -339,242 +339,246 @@ for address in addresses:
 
             db.close()
 
-        # ----------------------------------------------------------------------
-        if args.create_html:
-            db = sqlite3.connect(args.dbase)
-            c = db.cursor()
-            c.execute(SQL_CREATE_TABLE)
-
-            months = []
-
-            month = datetime.date.today().replace(day=1)
-            for i in range(0, 6):
-                months.append(month)
-                month = (month - datetime.timedelta(days=1)).replace(day=1)
-
-            c.execute(SQL_SELECT_COUNTERS, (months[-1],))
-            values = dict([(x[0], {}) for x in c.fetchall()])
-            for start in months:
-                end = start + datetime.timedelta(
-                        days=calendar.monthrange(start.year, start.month)[1])
-                for counter in values.keys():
-                    c.execute(SQL_GET_LAST_VALUE, (counter, start, end))
-                    row = c.fetchone()
-                    if row:
-                        values[counter][start] = row
-                    else:
-                        values[counter][start] = (None, None)
-
-            db.close()
-
-            names = ['янв', 'фев', 'мар',
-                     'апр', 'май', 'июн',
-                     'июл', 'авг', 'сен',
-                     'окт', 'ноя', 'дек']
-
-            table = []
-            table.append([''] + ['<span class="month">%s \'%s</span>' % \
-                            (names[x.month - 1], x.strftime('%y')) \
-                                                        for x in months])
-            for counter in sorted(values):
-                row = [counter]
-                for month in months:
-                    row.append(values[counter])
-
-            with open(args.create_html, 'w') as fh:
-                fh.write('<html>\n')
-                fh.write('<head>\n')
-                fh.write('<title>Показания счётчиков</title>\n')
-                fh.write('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n')
-                fh.write('<meta http-equiv="cache-control" content="max-age=0" />\n')
-                fh.write('<meta http-equiv="cache-control" content="no-cache" />\n')
-                fh.write('<meta http-equiv="expires" content="0" />\n')
-                fh.write('<meta http-equiv="expires" content="Tue, 01 Jan 1980 1:00:00 GMT" />\n')
-                fh.write('<meta http-equiv="pragma" content="no-cache" />\n')
-                fh.write('</head>\n')
-                fh.write('<style>\n')
-                fh.write('html, body { font-family: Helvetica, Arial, Sans-serif; background-color: #fff }\n')
-                fh.write('table { width: 100%; border-collapse: collapse; }\n')
-                fh.write('h1 { font-size: 1.5 em; font-weight: bold; }\n')
-                fh.write('tr:nth-child(even) { background-color: #e2f2c3; }\n')
-                fh.write('tr:nth-child(odd) { background-color: #edf2e3; }\n')
-                fh.write('tr:first-child { background-color: #6a9418; color: #fff; }\n')
-                fh.write('tr:hover { background-color: #b4de62; color: #000; }\n')
-                fh.write('th.month { font-size: 1.5em; }\n')
-                fh.write('td { padding: .5em; margin: 0; text-align: center; border: 1px solid #fff; }\n')
-                fh.write('.counter { display: block; font-size: 1.5em; }\n')
-                fh.write('.value-block { display: block; }\n')
-                fh.write('.readings-block { display: block; }\n')
-                fh.write('.delta { font-size: 1.5em; color: red;}\n')
-                fh.write('.value { font-size: 1em; color: #333; }\n')
-                fh.write('.date { font-size: .9em; color: #999; }\n')
-                fh.write('.doc { margin: 1em; font-size: 1em; color: #333; }\n')
-                fh.write('</style>\n')
-                fh.write('<body>\n')
-                fh.write('<h1>Показания счётчиков (%s)</h1>\n' % datetime.datetime.now().strftime('%d.%m.%y %H:%M'))
-                fh.write('<table>\n')
-                fh.write('<tr>\n')
-                fh.write('<th></th>\n')
-                current_month = datetime.date.today().replace(day=1)
-                for month in months:
-                    fh.write('<th class="month">%s \'%s</th>\n' % \
-                            (names[month.month - 1], month.strftime('%y')))
-                for counter in sorted(values):
-                    fh.write('<tr>\n')
-                    fh.write('<td><div class=counter>%s</div></td>\n' % counter)
-                    date_frmt = '%d.%m %H:%M'
-                    for month in months:
-                        fh.write('<td>')
-                        date, value = values[counter][month]
-                        if value is not None:
-                            date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
-                            prev_month = (month - datetime.timedelta(days=1)).replace(day=1)
-                            prev_val = values[counter].get(prev_month, (None, None))[1]
-                            delta = None
-                            if prev_val is not None:
-                                delta = value - prev_val
-                            if delta or prev_val is None or month == current_month:
-                                fh.write('<div class="value-block">')
-                                if delta:
-                                    fh.write('<div class="delta">%s</div>' % delta)
-                                else:
-                                    fh.write('<div class="delta">&nbsp;</div>')
-                                if value > 0 or month == current_month:
-                                    fh.write('<div class="readings-block">')
-                                    fh.write('<span class="value">%s</span>' % value)
-                                    fh.write('&nbsp;<span class="date">(%s)</span>' % date.strftime(date_frmt))
-                                    fh.write('</div>')
-                                fh.write('</div>')
-                        fh.write('</td>\n')
-                        date_frmt = '%d.%m'
-                    fh.write('</tr>\n')
-                fh.write('</tr>\n')
-                fh.write('</table>\n')
-
-                fh.write('<div class="doc">')
-                fh.write('<p><span style="font-weight: bold; color: red;">Красным</span> цветом указано количество кВт*ч, потреблённых в соответствующем месяце.</p>')
-                fh.write('<p><span style="font-weight: bold;">Чёрным</span> указаны показания счётчика, дата снятия показаний указана в скобках.')
-                fh.write('</div>')
+except mercury.OperationalError as e:
+    logger.error(str(e))
+    sys.exit(-1)
 
 
-                fh.write('</body>\n')
-                fh.write('</html>\n')
 
-        # ----------------------------------------------------------------------
-        if args.upload:
-            db = sqlite3.connect(args.dbase)
-            c = db.cursor()
-            c.execute(SQL_UPLOAD_SELECT)
-            data = c.fetchall()
 
-            if not data:
-                logger.debug('No data, exiting')
-                sys.exit(0)
+# ----------------------------------------------------------------------
+if args.create_html:
+    db = sqlite3.connect(args.dbase)
+    c = db.cursor()
+    c.execute(SQL_CREATE_TABLE)
 
-            # Create XML message
-            message = '<?xml version="1.0" encoding="utf-8"?>\n'
-            message += '<ElectrometersReadings>\n'
-            template = ' <Reading date="{date}" hub="{hub}" counter="{counter}" type="{type}" level="{level}">{value}</Reading>\n'
-            for hub, counter, level, type_, date, value in data:
-                date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
-                date = date.replace(tzinfo=local_timezone)
-                date = date.strftime('%Y-%m-%dT%H:%M:%S%z')
-                message += template.format(date=date,
-                                           hub=hub,
-                                           counter=counter,
-                                           type=type_,
-                                           level=level,
-                                           value=value)
-            message += '</ElectrometersReadings>\n'
+    months = []
 
-            # Load login and password
-            try:
-                with open(args.upload_credentials, 'r') as fh:
-                    login = fh.readline()
-                    password = fh.readline()
-                    if not login or not password:
-                        logger.error('Can\'t find login or password in '
-                                     'credentials file')
-                        sys.exit(-1)
-                    login = login.strip()
-                    password = password.strip()
-            except IOError as e:
-                logger.error(e)
+    month = datetime.date.today().replace(day=1)
+    for i in range(0, 6):
+        months.append(month)
+        month = (month - datetime.timedelta(days=1)).replace(day=1)
+
+    c.execute(SQL_SELECT_COUNTERS, (months[-1],))
+    values = dict([(x[0], {}) for x in c.fetchall()])
+    for start in months:
+        end = start + datetime.timedelta(
+                days=calendar.monthrange(start.year, start.month)[1])
+        for counter in values.keys():
+            c.execute(SQL_GET_LAST_VALUE, (counter, start, end))
+            row = c.fetchone()
+            if row:
+                values[counter][start] = row
+            else:
+                values[counter][start] = (None, None)
+
+    db.close()
+
+    names = ['янв', 'фев', 'мар',
+             'апр', 'май', 'июн',
+             'июл', 'авг', 'сен',
+             'окт', 'ноя', 'дек']
+
+    table = []
+    table.append([''] + ['<span class="month">%s \'%s</span>' % \
+                    (names[x.month - 1], x.strftime('%y')) \
+                                                for x in months])
+    for counter in sorted(values):
+        row = [counter]
+        for month in months:
+            row.append(values[counter])
+
+    with open(args.create_html, 'w') as fh:
+        fh.write('<html>\n')
+        fh.write('<head>\n')
+        fh.write('<title>Показания счётчиков</title>\n')
+        fh.write('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n')
+        fh.write('<meta http-equiv="cache-control" content="max-age=0" />\n')
+        fh.write('<meta http-equiv="cache-control" content="no-cache" />\n')
+        fh.write('<meta http-equiv="expires" content="0" />\n')
+        fh.write('<meta http-equiv="expires" content="Tue, 01 Jan 1980 1:00:00 GMT" />\n')
+        fh.write('<meta http-equiv="pragma" content="no-cache" />\n')
+        fh.write('</head>\n')
+        fh.write('<style>\n')
+        fh.write('html, body { font-family: Helvetica, Arial, Sans-serif; background-color: #fff }\n')
+        fh.write('table { width: 100%; border-collapse: collapse; }\n')
+        fh.write('h1 { font-size: 1.5 em; font-weight: bold; }\n')
+        fh.write('tr:nth-child(even) { background-color: #e2f2c3; }\n')
+        fh.write('tr:nth-child(odd) { background-color: #edf2e3; }\n')
+        fh.write('tr:first-child { background-color: #6a9418; color: #fff; }\n')
+        fh.write('tr:hover { background-color: #b4de62; color: #000; }\n')
+        fh.write('th.month { font-size: 1.5em; }\n')
+        fh.write('td { padding: .5em; margin: 0; text-align: center; border: 1px solid #fff; }\n')
+        fh.write('.counter { display: block; font-size: 1.5em; }\n')
+        fh.write('.value-block { display: block; }\n')
+        fh.write('.readings-block { display: block; }\n')
+        fh.write('.delta { font-size: 1.5em; color: red;}\n')
+        fh.write('.value { font-size: 1em; color: #333; }\n')
+        fh.write('.date { font-size: .9em; color: #999; }\n')
+        fh.write('.doc { margin: 1em; font-size: 1em; color: #333; }\n')
+        fh.write('</style>\n')
+        fh.write('<body>\n')
+        fh.write('<h1>Показания счётчиков (%s)</h1>\n' % datetime.datetime.now().strftime('%d.%m.%y %H:%M'))
+        fh.write('<table>\n')
+        fh.write('<tr>\n')
+        fh.write('<th></th>\n')
+        current_month = datetime.date.today().replace(day=1)
+        for month in months:
+            fh.write('<th class="month">%s \'%s</th>\n' % \
+                    (names[month.month - 1], month.strftime('%y')))
+        for counter in sorted(values):
+            fh.write('<tr>\n')
+            fh.write('<td><div class=counter>%s</div></td>\n' % counter)
+            date_frmt = '%d.%m %H:%M'
+            for month in months:
+                fh.write('<td>')
+                date, value = values[counter][month]
+                if value is not None:
+                    date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
+                    prev_month = (month - datetime.timedelta(days=1)).replace(day=1)
+                    prev_val = values[counter].get(prev_month, (None, None))[1]
+                    delta = None
+                    if prev_val is not None:
+                        delta = value - prev_val
+                    if delta or prev_val is None or month == current_month:
+                        fh.write('<div class="value-block">')
+                        if delta:
+                            fh.write('<div class="delta">%s</div>' % delta)
+                        else:
+                            fh.write('<div class="delta">&nbsp;</div>')
+                        if value > 0 or month == current_month:
+                            fh.write('<div class="readings-block">')
+                            fh.write('<span class="value">%s</span>' % value)
+                            fh.write('&nbsp;<span class="date">(%s)</span>' % date.strftime(date_frmt))
+                            fh.write('</div>')
+                        fh.write('</div>')
+                fh.write('</td>\n')
+                date_frmt = '%d.%m'
+            fh.write('</tr>\n')
+        fh.write('</tr>\n')
+        fh.write('</table>\n')
+
+        fh.write('<div class="doc">')
+        fh.write('<p><span style="font-weight: bold; color: red;">Красным</span> цветом указано количество кВт*ч, потреблённых в соответствующем месяце.</p>')
+        fh.write('<p><span style="font-weight: bold;">Чёрным</span> указаны показания счётчика, дата снятия показаний указана в скобках.')
+        fh.write('</div>')
+
+
+        fh.write('</body>\n')
+        fh.write('</html>\n')
+
+# ----------------------------------------------------------------------
+if args.upload:
+    db = sqlite3.connect(args.dbase)
+    c = db.cursor()
+    c.execute(SQL_UPLOAD_SELECT)
+    data = c.fetchall()
+
+    if not data:
+        logger.debug('No data, exiting')
+        sys.exit(0)
+
+    # Create XML message
+    message = '<?xml version="1.0" encoding="utf-8"?>\n'
+    message += '<ElectrometersReadings>\n'
+    template = ' <Reading date="{date}" hub="{hub}" counter="{counter}" type="{type}" level="{level}">{value}</Reading>\n'
+    for hub, counter, level, type_, date, value in data:
+        date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
+        date = date.replace(tzinfo=local_timezone)
+        date = date.strftime('%Y-%m-%dT%H:%M:%S%z')
+        message += template.format(date=date,
+                                   hub=hub,
+                                   counter=counter,
+                                   type=type_,
+                                   level=level,
+                                   value=value)
+    message += '</ElectrometersReadings>\n'
+
+    # Load login and password
+    try:
+        with open(args.upload_credentials, 'r') as fh:
+            login = fh.readline()
+            password = fh.readline()
+            if not login or not password:
+                logger.error('Can\'t find login or password in '
+                             'credentials file')
                 sys.exit(-1)
-
-            # Setup connection to server
-            cookie = cookielib.CookieJar()
-            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
-            opener = urllib2.build_opener(urllib2.HTTPHandler(),
-                                          urllib2.HTTPSHandler(context=context),
-                                          urllib2.HTTPCookieProcessor(cookie))
-
-            class Request(urllib2.Request):
-
-                def __init__(self, url, method, data, content_type=None):
-                    self._method = method
-                    urllib2.Request.__init__(self, url, data)
-                    if content_type is not None:
-                        self.add_header('Content-Type', content_type)
-
-                def get_method(self):
-                    return self._method
-
-            base_url = args.upload_url.strip()
-            if base_url.endswith('/'):
-                base_url = base_url.rstrip('/')
-
-            try:
-                # Create session
-                logger.debug('Connecting to {}'.format(args.upload_url))
-                logger.debug('Creating session for user {}'.format(login))
-                request = Request(base_url + '/auth',
-                                  'POST',
-                                  json.dumps({'login': login,
-                                              'password': password}),
-                                  'application/json')
-                fh = opener.open(request)
-                if fh.getcode() != 200:
-                    logger.error('Can\'t create session, '
-                                 'error %s' % fh.getcode())
-                    sys.exit(-1)
-                sid = json.loads(fh.read())['sid']
-
-                # Send data
-                logger.debug('Sending {} rows of data...'.format(len(data)))
-                request = Request(base_url + '/documents',
-                                  'POST',
-                                  message,
-                                  'application/xml')
-                fh = opener.open(request)
-                if fh.getcode() != 200:
-                    logger.error('Can\'t send data, '
-                                 'error %s' % fh.getcode())
-                else:
-                    # Mark readings as exported
-                    logger.debug('Mark readings as exported')
-                    for reading in data:
-                        c.execute(SQL_UPLOAD_MARK_EXPORTED,
-                            (reading[0], reading[1], reading[4], reading[5]))
-                    db.commit()
-
-                # Close session
-                logger.debug('Closing session')
-                request = Request(base_url + '/sessions/' + sid,
-                                  'DELETE',
-                                  None)
-                fh = opener.open(request)
-                if fh.getcode() != 200:
-                    logger.error('Can\'t close session, '
-                                 'error %s' % fh.getcode())
-                    sys.exit(-1)
-
-            except Exception as e:
-                logger.error(e)
-                sys.exit(-1)
-
-    except mercury.OperationalError as e:
-        logger.error(str(e))
+            login = login.strip()
+            password = password.strip()
+    except IOError as e:
+        logger.error(e)
         sys.exit(-1)
+
+    # Setup connection to server
+    cookie = cookielib.CookieJar()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+    opener = urllib2.build_opener(urllib2.HTTPHandler(),
+                                  urllib2.HTTPSHandler(context=context),
+                                  urllib2.HTTPCookieProcessor(cookie))
+
+    class Request(urllib2.Request):
+
+        def __init__(self, url, method, data, content_type=None):
+            self._method = method
+            urllib2.Request.__init__(self, url, data)
+            if content_type is not None:
+                self.add_header('Content-Type', content_type)
+
+        def get_method(self):
+            return self._method
+
+    base_url = args.upload_url.strip()
+    if base_url.endswith('/'):
+        base_url = base_url.rstrip('/')
+
+    try:
+        # Create session
+        logger.debug('Connecting to {}'.format(args.upload_url))
+        logger.debug('Creating session for user {}'.format(login))
+        request = Request(base_url + '/auth',
+                          'POST',
+                          json.dumps({'login': login,
+                                      'password': password}),
+                          'application/json')
+        fh = opener.open(request)
+        if fh.getcode() != 200:
+            logger.error('Can\'t create session, '
+                         'error %s' % fh.getcode())
+            sys.exit(-1)
+        sid = json.loads(fh.read())['sid']
+
+        # Send data
+        logger.debug('Sending {} rows of data...'.format(len(data)))
+        request = Request(base_url + '/documents',
+                          'POST',
+                          message,
+                          'application/xml')
+        fh = opener.open(request)
+        if fh.getcode() != 200:
+            logger.error('Can\'t send data, '
+                         'error %s' % fh.getcode())
+        else:
+            # Mark readings as exported
+            logger.debug('Mark readings as exported')
+            for reading in data:
+                c.execute(SQL_UPLOAD_MARK_EXPORTED,
+                    (reading[0], reading[1], reading[4], reading[5]))
+            db.commit()
+
+        # Close session
+        logger.debug('Closing session')
+        request = Request(base_url + '/sessions/' + sid,
+                          'DELETE',
+                          None)
+        fh = opener.open(request)
+        if fh.getcode() != 200:
+            logger.error('Can\'t close session, '
+                         'error %s' % fh.getcode())
+            sys.exit(-1)
+
+    except Exception as e:
+        logger.error(e)
+        sys.exit(-1)
+
 
 sys.exit(0)
