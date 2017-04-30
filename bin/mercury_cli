@@ -511,10 +511,11 @@ for address in addresses:
 
             class Request(urllib2.Request):
 
-                def __init__(self, url, method, data, content_type):
+                def __init__(self, url, method, data, content_type=None):
                     self._method = method
                     urllib2.Request.__init__(self, url, data)
-                    self.add_header('Content-Type', content_type)
+                    if content_type is not None:
+                        self.add_header('Content-Type', content_type)
 
                 def get_method(self):
                     return self._method
@@ -527,7 +528,7 @@ for address in addresses:
                 # Create session
                 logger.debug('Connecting to {}'.format(args.upload_url))
                 logger.debug('Creating session for user {}'.format(login))
-                request = Request(base_url + '/sessions',
+                request = Request(base_url + '/auth',
                                   'POST',
                                   json.dumps({'login': login,
                                               'password': password}),
@@ -561,8 +562,7 @@ for address in addresses:
                 logger.debug('Closing session')
                 request = Request(base_url + '/sessions/' + sid,
                                   'DELETE',
-                                  None,
-                                  'application/json')
+                                  None)
                 fh = opener.open(request)
                 if fh.getcode() != 200:
                     logger.error('Can\'t close session, '
