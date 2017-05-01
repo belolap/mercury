@@ -440,6 +440,11 @@ if args.create_html:
                     delta = None
                     if prev_val is not None:
                         delta = value - prev_val
+                        if value < prev_val:
+                            max_val = int('1' + '0' * len(str(prev_val)))
+                            change = max_val - prev_val + value
+                            if float(change) / max_val < 0.6:
+                                delta = change
                     if delta or prev_val is None or month == current_month:
                         fh.write('<div class="value-block">')
                         if delta:
