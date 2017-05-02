@@ -31,25 +31,6 @@ CREATE TABLE IF NOT EXISTS data (
   value INTEGER NOT NULL,
   exported BOOL NOT NULL DEFAULT 0);'''
 
-SQL_SEARCH_HISTORY_RECORD = '''\
-SELECT
-  hub, counter, date, value
-FROM data
-WHERE
-  hub=? AND
-  counter=? AND
-  date=?'''
-
-SQL_SEARCH_LAST_RECORD = '''\
-SELECT
-  hub, counter, date, value
-FROM data
-WHERE
-  hub=? AND
-  counter=?
-ORDER BY date DESC
-LIMIT 1'''
-
 SQL_SELECT_COUNTERS = '''\
 SELECT
   DISTINCT(counter)
@@ -58,26 +39,19 @@ FROM
 WHERE
   date > ?'''
 
-SQL_GET_LAST_VALUE = '''\
+SQL_SEARCH_MONTH_RECORD = '''\
 SELECT
-  date, value
-FROM
-  data
+  hub, counter, date, value
+FROM data
 WHERE
+  hub = ? AND
   counter = ? AND
-  date > ? AND
-  date < ?
+  type = ? AND
+  date >= ? AND
+  date < ? AND
+  value = ?
 ORDER BY date DESC
-LIMIT 1;
-'''
-
-SQL_UPDATE_LAST_RECORD = '''\
-UPDATE data
-SET date=?
-WHERE
-  hub=? AND
-  counter=? AND
-  date=?'''
+LIMIT 1'''
 
 SQL_INSERT_RECORD = '''\
 INSERT INTO
@@ -85,9 +59,32 @@ INSERT INTO
 VALUES
   (?, ?, ?, ?, ?, ?, 0)'''
 
+SQL_UPDATE_MONTH_RECORD = '''\
+UPDATE data
+SET date=?, level=?
+WHERE
+  hub=? AND
+  counter=? AND
+  type=? AND
+  date=?'''
+
+SQL_GET_LAST_VALUE = '''\
+SELECT
+  date, value
+FROM
+  data
+WHERE
+  counter = ? AND
+  type > 0 AND
+  date >= ? AND
+  date < ?
+ORDER BY date DESC
+LIMIT 1;
+'''
+
 SQL_UPLOAD_SELECT = '''\
 SELECT
-    hub, counter, level, type, date, value
+    hub, counter, type, date, value, level
 FROM data
 WHERE exported=0
 ORDER BY date
@@ -96,7 +93,12 @@ LIMIT 100'''
 SQL_UPLOAD_MARK_EXPORTED='''\
 UPDATE data
 SET exported=1
-WHERE hub=? AND counter=? AND date=? AND value=?
+WHERE
+  hub=? AND
+  counter=? AND
+  type=? AND
+  date=? AND
+  value=?
 '''
 
 
@@ -131,7 +133,7 @@ commands_group.add_argument('--upload', action='store_true',
 
 set_config = parser.add_argument_group('set-config command options')
 set_config.add_argument('--config-counters', type=int, metavar='NUMBER',
-                    help='capaсity of network')
+                    help='capacity of network')
 set_config.add_argument('--config-mode', metavar='MODE',
                     help='device mode: Normal | MasterSR | SlaveSRT | SlaveSR')
 
@@ -296,47 +298,68 @@ try:
             c = db.cursor()
             c.execute(SQL_CREATE_TABLE)
 
-            def add_record(address, counter, record):
-                if record['type'] > 0:
-                    c.execute(SQL_INSERT_RECORD, (address,
-                                                  counter,
-                                                  record['level'],
-                                                  record['type'],
-                                                  record['date'],
-                                                  record['value']))
-                    db.commit()
-
             address = hub.execute(command.GetNetworkID())
             config = hub.execute(command.GetConfig())
             for counter in range(0, config['counters']):
-                history = hub.execute(command.GetHistory(counter))
-                if history:
-                    last_record = history[-1]
-                    for record in history[:-1]:
-                        c.execute(SQL_SEARCH_HISTORY_RECORD,
-                                            (address, counter, record['date']))
-                        existing = c.fetchone()
-                        if existing is None:
-                            add_record(address, counter, record)
+                logger.debug('Process counter %s.%s' % (address, counter))
 
-                    c.execute(SQL_SEARCH_LAST_RECORD, (address, counter))
+                history = hub.execute(command.GetHistory(counter))
+                if not history:
+                    continue
+
+                for record in history:
+                    logger.debug('History record: %s %s (level=%s, type=%s)' % (
+                            record['date'].strftime('%Y-%m-%d %H:%M'),
+                            record['value'] is not None and '% 5i' % record['value'] or '-',
+                            record['level'],
+                            record['type']
+                    ))
+                    if record['value'] is None or record['date'] is None:
+                        logger.debug('Data is not full, skipping')
+                        continue
+
+                    month_start = datetime.datetime(record['date'].year,
+                                                    record['date'].month,
+                                                    1)
+                    try:
+                        month_end = datetime.datetime(month_start.year,
+                                                      month_start.month + 1,
+                                                      1)
+                    except ValueError:
+                        month_end = datetime.datetime(month_start.year + 1,
+                                                      1,
+                                                      1)
+                    c.execute(SQL_SEARCH_MONTH_RECORD,
+                              (address, counter, record['type'],
+                               month_start, month_end, record['value']))
                     existing = c.fetchone()
-                    if existing is None or existing[3] != last_record['value']:
-                        add_record(address, counter, last_record)
+                    if existing is None:
+                        logger.debug('Add record: %s %s (level=%s, type=%s)' % (
+                                record['date'].strftime('%Y-%m-%d %H:%M'),
+                                record['value'],
+                                record['level'],
+                                record['type']
+                        ))
+                        c.execute(SQL_INSERT_RECORD, (address,
+                                                      counter,
+                                                      record['level'],
+                                                      record['type'],
+                                                      record['date'],
+                                                      record['value']))
+                        db.commit()
                     else:
                         existing_date = datetime.datetime.strptime(
-                                            existing[2], '%Y-%m-%d %H:%M:%S')
-                        existing_month = existing_date.replace(day=1).date()
-                        last_month = last_record['date'].replace(day=1).date()
-                        if existing_month == last_month:
-                            if existing_date != last_record['date']:
-                                c.execute(SQL_UPDATE_LAST_RECORD, (
-                                        last_record['date'], address, counter,
-                                        existing_date))
+                                    existing[2], '%Y-%m-%d %H:%M:%S')
+                        if existing_date < record['date']:
+                            logger.debug('Update record: %s -> %s' % (
+                                    existing_date.strftime('%Y-%m-%d %H:%M'),
+                                    record['date'].strftime('%Y-%m-%d %H:%M')
+                            ))
+                            c.execute(SQL_UPDATE_MONTH_RECORD, (
+                                    record['date'], record['level'],
+                                    address, counter, record['type'],
+                                    existing_date))
                             db.commit()
-                        else:
-                            add_record(address, counter, last_record)
-
             db.close()
 
 except mercury.OperationalError as e:
@@ -486,15 +509,23 @@ if args.upload:
     # Create XML message
     message = '<?xml version="1.0" encoding="utf-8"?>\n'
     message += '<ElectrometersReadings>\n'
-    template = ' <Reading date="{date}" hub="{hub}" counter="{counter}" type="{type}" level="{level}">{value}</Reading>\n'
-    for hub, counter, level, type_, date, value in data:
+    template = ' <Reading date="{date}" hub="{hub}" counter="{counter}" zone="{zone}" level="{level}">{value}</Reading>\n'
+    zones = {
+        0: 1,
+        1: 2,
+        2: 3,
+        3: 4,
+        15: 0,
+    }
+    for hub, counter, type_, date, value, level in data:
         date = datetime.datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
         date = date.replace(tzinfo=local_timezone)
         date = date.strftime('%Y-%m-%dT%H:%M:%S%z')
+
         message += template.format(date=date,
                                    hub=hub,
                                    counter=counter,
-                                   type=type_,
+                                   zone=zones.get(type_),
                                    level=level,
                                    value=value)
     message += '</ElectrometersReadings>\n'
@@ -567,7 +598,7 @@ if args.upload:
             logger.debug('Mark readings as exported')
             for reading in data:
                 c.execute(SQL_UPLOAD_MARK_EXPORTED,
-                    (reading[0], reading[1], reading[4], reading[5]))
+                    (reading[0], reading[1], reading[2], reading[3], reading[4]))
             db.commit()
 
         # Close session
